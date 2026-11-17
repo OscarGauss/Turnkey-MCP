@@ -62,8 +62,19 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true, snapshot: getSnapshot()?.finishedAt ?? null, scan: { running: p.running, phase: p.phase, done: p.done, total: p.total } });
 });
 
+const RETRY_AFTER_FAILURE_MINUTES = Math.min(5, config.scanIntervalMinutes);
+
+// A failed scan leaves the tools without data, so it is retried sooner than the regular interval.
+function scheduleScans() {
+  startScan()
+    .then(
+      () => config.scanIntervalMinutes,
+      () => RETRY_AFTER_FAILURE_MINUTES,
+    )
+    .then((minutes) => setTimeout(scheduleScans, minutes * 60_000).unref());
+}
+
 app.listen(config.port, () => {
   console.log(`[http] Turnkey read-only MCP listening on :${config.port} (MCP endpoint ${mcpUrl.href})`);
-  startScan().catch(() => undefined);
-  setInterval(() => startScan().catch(() => undefined), config.scanIntervalMinutes * 60_000).unref();
+  scheduleScans();
 });

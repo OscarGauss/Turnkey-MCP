@@ -121,7 +121,7 @@ export function createServer(): McpServer {
       const s = await Promise.race([p, new Promise<undefined>((r) => setTimeout(() => r(undefined), wait_seconds * 1000))]);
       const prog = getProgress();
       return json({
-        status: s ? "done" : "running",
+        status: s ? "done" : prog.phase === "failed" ? "failed" : "running",
         previous_snapshot: before ?? null,
         current_snapshot: getSnapshot()?.finishedAt ?? null,
         progress: `${prog.done}/${prog.total || "?"} (${prog.phase})`,
