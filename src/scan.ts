@@ -81,12 +81,11 @@ function findSubOrgId(a: Activity): string | undefined {
 async function scanOrg(orgId: string, isParent: boolean, windowStartMs: number): Promise<OrgSnapshot> {
   const snap: OrgSnapshot = { organizationId: orgId, isParent, wallets: 0, accounts: 0, addressFormats: {}, signatures: [] };
   try {
-    const [wallets, accounts, signing, latest] = await Promise.all([
-      getWallets(orgId),
-      getAllWalletAccounts(orgId),
-      listActivitiesSince(orgId, windowStartMs, { types: [...SIGNING_TYPES], completedOnly: true }),
-      listActivitiesSince(orgId, 0, { stopAtFirst: true }),
-    ]);
+    // One request at a time per org: SCAN_CONCURRENCY is then the number of requests in flight.
+    const wallets = await getWallets(orgId);
+    const accounts = await getAllWalletAccounts(orgId);
+    const signing = await listActivitiesSince(orgId, windowStartMs, { types: [...SIGNING_TYPES], completedOnly: true });
+    const latest = await listActivitiesSince(orgId, 0, { stopAtFirst: true });
     snap.wallets = wallets.length;
     snap.accounts = accounts.length;
     for (const acc of accounts) {
@@ -158,9 +157,22 @@ async function doScan(): Promise<Snapshot> {
   return snap;
 }
 
+// A scan costs one request per page per org against a rate limit shared with production, so
+// on-demand scans (refresh_data) are spaced out; the background schedule is not affected.
+export const RETRY_AFTER_FAILURE_MINUTES = Math.min(5, config.scanIntervalMinutes);
+const ON_DEMAND_MIN_AGE_MINUTES = 60;
+let lastStartMs = 0;
+
+/** Milliseconds until refresh_data may start a scan (0 = now). */
+export function onDemandScanAllowedInMs(): number {
+  const gapMinutes = current ? ON_DEMAND_MIN_AGE_MINUTES : RETRY_AFTER_FAILURE_MINUTES;
+  return Math.max(0, lastStartMs + gapMinutes * 60_000 - Date.now());
+}
+
 /** Starts a scan unless one is already running. Returns the in-flight promise. */
 export function startScan(): Promise<Snapshot> {
   if (!running) {
+    lastStartMs = Date.now();
     running = doScan()
       .then((s) => {
         current = s;
@@ -180,9 +192,9 @@ export function startScan(): Promise<Snapshot> {
   return running;
 }
 
-/** Waits up to `ms` for a snapshot. Returns undefined if still scanning. */
+/** Waits up to `ms` for the running scan, without starting one. Undefined if there is no snapshot yet. */
 export async function snapshotWithin(ms: number): Promise<Snapshot | undefined> {
-  if (current) return current;
-  const p = startScan().catch(() => undefined);
+  if (current || !running) return current;
+  const p = running.catch(() => undefined);
   return Promise.race([p, new Promise<undefined>((r) => setTimeout(() => r(undefined), ms))]);
 }

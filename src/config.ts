@@ -64,8 +64,10 @@ export const config = {
 
   // Scanner
   scanWindowDays: num("SCAN_WINDOW_DAYS", 180),
-  scanIntervalMinutes: num("SCAN_INTERVAL_MINUTES", 60),
-  scanConcurrency: num("SCAN_CONCURRENCY", 6),
+  scanIntervalMinutes: num("SCAN_INTERVAL_MINUTES", 360),
+  // Turnkey's rate limit is shared with every other client of the same organization.
+  scanConcurrency: num("SCAN_CONCURRENCY", 1),
+  scanMaxRequestsPerSecond: num("SCAN_MAX_REQUESTS_PER_SECOND", 4),
   maxSubOrgs: num("MAX_SUB_ORGS", 20000),
 
   // Network classification overrides (EVM chain IDs)

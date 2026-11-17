@@ -2,7 +2,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { getProgress, getSnapshot, snapshotWithin, startScan, type Snapshot } from "./scan.js";
+import { getProgress, getSnapshot, onDemandScanAllowedInMs, snapshotWithin, startScan, type Snapshot } from "./scan.js";
 import { activeSubOrgs, freshness, projection, signatureStats, subOrgGrowth, walletDistribution } from "./analytics.js";
 
 const READ_ONLY = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true } as const;
@@ -15,7 +15,7 @@ function notReady() {
   return json({
     status: failed ? "failed" : "scanning",
     message: failed
-      ? "The scan of your Turnkey organization failed. Check last_error (API key, organization ID, network) and call refresh_data."
+      ? "The scan of your Turnkey organization failed. Check last_error (API key, organization ID, network). It retries on its own every few minutes; refresh_data shows its progress."
       : "The first scan of your Turnkey organization is still running. Try again in a minute.",
     progress: `${p.done}/${p.total || "?"} organizations (${p.phase})`,
     last_error: p.lastError,
@@ -111,17 +111,20 @@ export function createServer(): McpServer {
     "refresh_data",
     {
       title: "Refresh / scan status",
-      description: "Starts a fresh scan of the Turnkey organization (if none is running) and reports progress. Use when the user wants up-to-the-minute numbers.",
+      description:
+        "Reports scan progress and starts a new scan of the Turnkey organization when the last one began at least 60 minutes ago (5 minutes after a failed scan). Scans share Turnkey's rate limit with production, so the snapshot is usually what to answer from.",
       inputSchema: { wait_seconds: z.number().int().min(0).max(50).default(40) },
       annotations: { ...READ_ONLY, idempotentHint: false },
     },
     async ({ wait_seconds }) => {
       const before = getSnapshot()?.finishedAt;
-      const p = startScan().catch(() => undefined);
-      const s = await Promise.race([p, new Promise<undefined>((r) => setTimeout(() => r(undefined), wait_seconds * 1000))]);
+      const allowedInMs = onDemandScanAllowedInMs();
+      const p = getProgress().running || allowedInMs === 0 ? startScan().catch(() => undefined) : undefined;
+      const s = p ? await Promise.race([p, new Promise<undefined>((r) => setTimeout(() => r(undefined), wait_seconds * 1000))]) : undefined;
       const prog = getProgress();
       return json({
-        status: s ? "done" : prog.phase === "failed" ? "failed" : "running",
+        status: s ? "done" : prog.running ? "running" : prog.phase === "failed" ? "failed" : "not_started",
+        ...(p ? {} : { next_scan_allowed_in_minutes: Math.ceil(allowedInMs / 60_000) }),
         previous_snapshot: before ?? null,
         current_snapshot: getSnapshot()?.finishedAt ?? null,
         progress: `${prog.done}/${prog.total || "?"} (${prog.phase})`,

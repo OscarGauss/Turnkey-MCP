@@ -6,7 +6,7 @@ import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelconte
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { config } from "./config.js";
 import { createServer } from "./server.js";
-import { getProgress, getSnapshot, startScan } from "./scan.js";
+import { getProgress, getSnapshot, RETRY_AFTER_FAILURE_MINUTES, startScan } from "./scan.js";
 import { loginRouter, mcpUrl, provider } from "./oauth.js";
 
 const app = express();
@@ -61,8 +61,6 @@ app.get("/health", (_req, res) => {
   const p = getProgress();
   res.json({ ok: true, snapshot: getSnapshot()?.finishedAt ?? null, scan: { running: p.running, phase: p.phase, done: p.done, total: p.total } });
 });
-
-const RETRY_AFTER_FAILURE_MINUTES = Math.min(5, config.scanIntervalMinutes);
 
 // A failed scan leaves the tools without data, so it is retried sooner than the regular interval.
 function scheduleScans() {

@@ -32,7 +32,7 @@ export function freshness(s: Snapshot) {
     data_as_of: s.finishedAt,
     scan_window_days: s.windowDays,
     orgs_with_errors: s.errors,
-    note: "Snapshot from the background scanner. Call refresh_data for newer numbers.",
+    note: "Snapshot from the background scanner, which refreshes on a fixed schedule. refresh_data starts a new scan only if this one is at least an hour old.",
   };
 }
 
@@ -68,31 +68,55 @@ export function subOrgGrowth(s: Snapshot, months = 6) {
   };
 }
 
+// Below this many days the current month's pace is too noisy; the last full month stands in.
+const MIN_DAYS_FOR_CURRENT_PACE = 7;
+
 export function projection(s: Snapshot, horizons: number[] = [3, 6], monthlyGrowthPct?: number) {
   const g = subOrgGrowth(s, 6);
   const base = g.total_sub_orgs_today;
-  const perMonth = g.avg_created_per_month_last_3_full_months;
+  const avg3 = g.avg_created_per_month_last_3_full_months;
+
+  const now = new Date();
+  const day = now.getUTCDate();
+  const lastFullKey = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1)).toISOString().slice(0, 7);
+  const useCurrent = day >= MIN_DAYS_FOR_CURRENT_PACE;
+  const latest = useCurrent ? g.current_month_projected_at_current_pace : (g.created_per_month[lastFullKey] ?? 0);
+  const latestSource = useCurrent
+    ? `pace of ${g.current_month} so far (${day} days), extended to the full month`
+    : `${lastFullKey}, the last full month (${g.current_month} has under ${MIN_DAYS_FOR_CURRENT_PACE} days of data)`;
+
   const out: Record<string, any> = {};
   for (const h of horizons) {
-    const linear = base + perMonth * h;
     let compounding: number | undefined;
     if (monthlyGrowthPct !== undefined) {
-      // New sub-orgs per month grow by monthlyGrowthPct each month.
-      let total = base, adds = perMonth;
+      // New sub-orgs per month start at the latest rate and grow by monthlyGrowthPct each month.
+      let total = base, adds = latest;
       for (let i = 0; i < h; i++) { adds *= 1 + monthlyGrowthPct / 100; total += adds; }
       compounding = total;
     }
     out[`in_${h}_months`] = {
-      linear_at_recent_rate: Math.round(linear),
+      linear_at_latest_rate: Math.round(base + latest * h),
+      linear_at_3_month_average: Math.round(base + avg3 * h),
       ...(compounding !== undefined ? { with_growth_assumption: Math.round(compounding) } : {}),
     };
   }
+
+  const shifted = avg3 > 0 ? latest / avg3 >= 2 || latest / avg3 <= 0.5 : latest > 0;
   return {
     today: base,
-    recent_new_sub_orgs_per_month: perMonth,
-    assumption: monthlyGrowthPct !== undefined
-      ? `Linear = today + recent monthly rate × months. Growth = monthly new sub-orgs grow ${monthlyGrowthPct}% per month.`
-      : "Linear = today + average new sub-orgs per month (last 3 full months) × months. Pass monthly_growth_pct to model acceleration.",
+    new_sub_orgs_per_month: {
+      latest_rate: latest,
+      latest_rate_source: latestSource,
+      avg_last_3_full_months: avg3,
+    },
+    assumption:
+      "Linear = today + new sub-orgs per month × months, at the latest rate and at the 3-month average." +
+      (monthlyGrowthPct !== undefined
+        ? ` Growth = new sub-orgs per month start at the latest rate and grow ${monthlyGrowthPct}% per month.`
+        : " Pass monthly_growth_pct to model acceleration."),
+    ...(shifted
+      ? { note: "The latest rate differs from the 3-month average by 2x or more, so the creation rate changed recently; linear_at_latest_rate reflects it, the average lags behind." }
+      : {}),
     projections: out,
   };
 }

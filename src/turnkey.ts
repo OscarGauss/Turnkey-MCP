@@ -24,10 +24,34 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 type SignedRequest = Awaited<ReturnType<typeof client.stampGetWallets>>;
 
+// The rate limit belongs to the Turnkey organization, so it is shared with the production
+// services that use it. A 429 pauses every request of the scanner, not just the one that got it,
+// for as long as Turnkey asks ("please wait a minute").
+const RATE_LIMIT_PAUSE_MS = 60_000;
+let pausedUntil = 0;
+
+async function waitForRateLimit() {
+  while (Date.now() < pausedUntil) await sleep(pausedUntil - Date.now());
+}
+
+// Requests start at most SCAN_MAX_REQUESTS_PER_SECOND apart, however many are in flight.
+const minGapMs = 1000 / config.scanMaxRequestsPerSecond;
+let nextStartAt = 0;
+
+async function throttle() {
+  await waitForRateLimit();
+  const t = Date.now();
+  const at = Math.max(t, nextStartAt);
+  nextStartAt = at + minGapMs;
+  if (at > t) await sleep(at - t);
+  await waitForRateLimit();
+}
+
 // @turnkey/http sends through node-fetch 2, which fails reading Turnkey's responses on some
 // hosts ("Premature close") while Node's own fetch reads the same signed request fine.
 // The client only signs; the request goes out with the native fetch.
 async function send<T>(signed: Promise<SignedRequest>): Promise<T> {
+  await throttle();
   const s = await signed;
   const res = await fetch(s.url, {
     method: "POST",
@@ -49,7 +73,7 @@ async function send<T>(signed: Promise<SignedRequest>): Promise<T> {
   return JSON.parse(text) as T;
 }
 
-/** Retries on rate limits (429) and transient 5xx errors with exponential backoff. */
+/** Retries rate limits (after a scanner-wide pause) and transient errors (with exponential backoff). */
 async function withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
   let delay = 500;
   for (let attempt = 1; ; attempt++) {
@@ -57,8 +81,13 @@ async function withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
       return await fn();
     } catch (err: any) {
       const msg = String(err?.message ?? err);
-      const retriable = /^(429|50[0-4]) |rate.?limit|too many|timeout|aborted|premature close|ECONNRESET|fetch failed/i.test(msg);
-      if (!retriable || attempt >= 6) throw new Error(`${label}: ${msg}`);
+      const rateLimited = /^429 |rate.?limit|too many|resource exhausted/i.test(msg);
+      const transient = /^50[0-4] |timeout|aborted|premature close|ECONNRESET|fetch failed/i.test(msg);
+      if ((!rateLimited && !transient) || attempt >= 6) throw new Error(`${label}: ${msg}`);
+      if (rateLimited) {
+        pausedUntil = Math.max(pausedUntil, Date.now() + RATE_LIMIT_PAUSE_MS);
+        continue; // send() waits out the pause
+      }
       await sleep(delay + Math.random() * 250);
       delay *= 2;
     }

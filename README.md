@@ -17,10 +17,10 @@ It only calls Turnkey **query** endpoints (`/public/v1/query/*`). There is no co
 ```
 MCP client ──HTTPS──▶ /mcp (Streamable HTTP, OAuth 2.1) ──▶  in-memory snapshot
                                                                ▲
-                             background scanner (every 60 min) ┘──▶ Turnkey query API
+                            background scanner (every 6 hours) ┘──▶ Turnkey query API
 ```
 
-Scanning a large organization takes many API calls, so a background job builds a snapshot at startup and refreshes it periodically. Tool calls answer instantly from that snapshot; `refresh_data` forces a new scan.
+Scanning a large organization takes many API calls, so a background job builds a snapshot at startup and refreshes it periodically. Tool calls answer instantly from that snapshot. Turnkey rate-limits per organization, so the scanner shares that quota with your production services: it sends one request at a time by default, at most `SCAN_MAX_REQUESTS_PER_SECOND`, and pauses for a minute whenever Turnkey answers `429`.
 
 ## Tools
 
@@ -28,11 +28,11 @@ Scanning a large organization takes many API calls, so a background job builds a
 |---|---|
 | `usage_summary` | Everything below in one call. Start here. |
 | `sub_org_growth` | Sub-orgs today, created per month, average of the last 3 full months, current-month pace. |
-| `project_sub_orgs` | Sub-orgs expected in N months (linear at the recent rate, optional `monthly_growth_pct`). |
+| `project_sub_orgs` | Sub-orgs expected in N months, linear at the latest rate and at the 3-month average, optional `monthly_growth_pct`. |
 | `wallet_distribution` | Wallets and accounts per sub-org (avg, median, p90, max, histogram), accounts by address format. |
 | `signature_stats` | Signatures per month and last 30 days, split mainnet / testnet / unknown, by type and by network. |
 | `active_sub_orgs` | Sub-orgs with any activity, and with at least one signature, in the last N days. |
-| `refresh_data` | Starts a new scan and reports progress. |
+| `refresh_data` | Reports scan progress; starts a new scan only if the last one began 60+ minutes ago (5 after a failure). |
 
 ---
 
@@ -67,8 +67,9 @@ openssl rand -hex 32   # paste as MCP_AUTH_TOKEN
 | `PORT` | | Default `3000` |
 | `TRUST_PROXY` | | Reverse proxies in front of the app. Default `1`; `0` if clients connect directly |
 | `SCAN_WINDOW_DAYS` | | Signing history kept in memory. Default `180` |
-| `SCAN_INTERVAL_MINUTES` | | Background refresh. Default `60` |
-| `SCAN_CONCURRENCY` | | Parallel Turnkey requests. Default `6` (lower it if you hit rate limits) |
+| `SCAN_INTERVAL_MINUTES` | | Background refresh. Default `360` (6 hours) |
+| `SCAN_CONCURRENCY` | | Turnkey requests in flight. Default `1`. Turnkey rate-limits per organization, so the scan shares its quota with your production services; raise it with care |
+| `SCAN_MAX_REQUESTS_PER_SECOND` | | Cap on request starts per second. Default `4` |
 | `TESTNET_CHAIN_IDS` / `MAINNET_CHAIN_IDS` | | Extra EVM chain IDs to classify, comma-separated |
 
 ## 3. Run
@@ -133,14 +134,14 @@ The token never goes in the URL. Every person you give `MCP_AUTH_TOKEN` to gets 
 - **Signatures:** completed signing activities (`SIGN_RAW_PAYLOAD*`, `SIGN_TRANSACTION*`, `ETH_SEND_*`, `SOL_SEND_*`) in the parent and every sub-org. `SIGN_RAW_PAYLOADS` counts each payload. Totals may differ slightly from the dashboard's billing counter.
 - **Mainnet vs testnet:** known only when Turnkey sees the network: send-transaction activities carry a CAIP-2 chain ID, and EVM unsigned transactions are decoded for their chain ID (classified with viem's chain registry). Raw-payload and message signatures, and Solana `SIGN_TRANSACTION`, don't include the network and are reported as `unknown`. If most of your volume is raw payloads, get the split from your own backend.
 - **Active sub-orgs:** a sub-org with any activity (session/login, signing, wallet creation…) in the window; also reported: sub-orgs with at least one signature.
-- **Projection:** today + average new sub-orgs per month over the last 3 full months × months; optionally with a month-over-month growth rate.
+- **Projection:** today + new sub-orgs per month × months, at two rates: the latest one (the current month's pace once it has 7 days of data, otherwise the last full month) and the average of the last 3 full months. With `monthly_growth_pct`, new sub-orgs per month start at the latest rate and grow by that percentage each month.
 
 All months are UTC.
 
 ## Troubleshooting
 
-- `/health` shows `phase: "failed"`: check the organization ID and API key; the `refresh_data` tool shows `last_error`.
-- Rate-limit errors: lower `SCAN_CONCURRENCY`.
+- `/health` shows `phase: "failed"`: check the organization ID and API key; the `refresh_data` tool shows `last_error`. A failed scan is retried every 5 minutes.
+- Rate-limit errors (`429 Resource exhausted`): the scanner pauses for a minute on each one; if they persist, lower `SCAN_CONCURRENCY` or raise `SCAN_INTERVAL_MINUTES`.
 - 401 from `/mcp`: the bearer token doesn't match `MCP_AUTH_TOKEN`, or the OAuth token expired and the client didn't refresh it (reconnect it).
 - OAuth sign-in fails or redirects to the wrong host: `PUBLIC_URL` must be the exact public HTTPS address clients use.
 
