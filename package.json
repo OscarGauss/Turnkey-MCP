@@ -1,0 +1,28 @@
+{
+  "name": "turnkey-readonly-mcp",
+  "version": "0.1.0",
+  "description": "Remote, read-only MCP server for Turnkey usage analytics (sub-orgs, wallets, signatures, activity).",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc && node --env-file=.env dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "@turnkey/api-key-stamper": "0.6.18",
+    "@turnkey/http": "6.7.0",
+    "express": "5.3.0",
+    "viem": "2.57.12",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.6",
+    "@types/node": "24.19.2",
+    "typescript": "6.0.3"
+  }
+}
